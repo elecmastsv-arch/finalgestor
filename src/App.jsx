@@ -12,6 +12,7 @@ const RESULT = { P1:'P1', P2:'P2', DRAW:'DRAW', BYE:'BYE' }
 const DEFAULT_POINTS = { WIN:3, DRAW:1, LOSS:0, BYE:3 }
 const uid = (p='id') => p + '_' + Math.random().toString(36).slice(2,9)
 const todayISO = () => new Date().toISOString().slice(0,10)
+const darkGray = [80, 80, 80]
 
 function emptyTournament(name='Mi Torneo CSWO', templateId=null){
   const slug = slugify(name)
@@ -78,7 +79,12 @@ function calcStandings(t){
     } else if(m.result===RESULT.P2){ 
       b.points+=POINTS.WIN; b.wins++; a.losses++ 
     } else if(m.result===RESULT.DRAW){ 
-      a.points+=POINTS.DRAW; b.points+=POINTS.DRAW; a.draws++; b.draws++ 
+      // Si es empate 0-0, ambos jugadores reciben 0 puntos
+      if(m.p1Wins === 0 && m.p2Wins === 0) {
+        a.draws++; b.draws++;
+      } else {
+        a.points+=POINTS.DRAW; b.points+=POINTS.DRAW; a.draws++; b.draws++;
+      }
     }
   }))
   const mw = p => { const tot=p.wins+p.draws+p.losses; return tot? (p.wins+0.5*p.draws)/tot : 0 }
@@ -243,7 +249,7 @@ function determineResult(m){
   if(!m.p2) return RESULT.BYE
   if(m.p1Wins>m.p2Wins) return RESULT.P1
   if(m.p2Wins>m.p1Wins) return RESULT.P2
-  if(m.p1Wins===m.p2Wins && (m.p1Wins>0||m.p2Wins>0)) return RESULT.DRAW
+  if(m.p1Wins===m.p2Wins && m.p1Wins>=0) return RESULT.DRAW // Modificado para incluir casos 0-0
   return null
 }
 
@@ -413,7 +419,9 @@ ${duplicates.length ? `Se omitieron ${duplicates.length} jugadores duplicados.` 
         updatedMatch = { ...updatedMatch, result: 'P1', p1Wins: 2, p2Wins: 0 };
       } else {
         // Caso normal = determinar resultado basado en los marcadores
-        updatedMatch = { ...updatedMatch, result: determineResult(currentMatch) };
+        const result = determineResult(currentMatch);
+        // Asegurarnos de que un resultado 0-0 es considerado como un empate válido
+        updatedMatch = { ...updatedMatch, result };
       }
       
       setT({...t, rounds: t.rounds.map(r => 
@@ -555,10 +563,10 @@ ${duplicates.length ? `Se omitieron ${duplicates.length} jugadores duplicados.` 
       return
     }
     
-    // PDF para clasificación
+    // PDF para clasificación (type === 'standings' o 'final')
     const st = standings
     
-    // Título de la sección con estilo TCG
+    // Título de la sección
     addSectionHeader(doc, 'CLASIFICACIÓN', y)
     y += 15
     
@@ -614,6 +622,7 @@ ${duplicates.length ? `Se omitieron ${duplicates.length} jugadores duplicados.` 
     
     // Pie de página con estilo
     addFooter(doc)
+    // Asegurar que se guarda el PDF correctamente
     doc.save(`Torneo_${slugify(t.meta.name)}_${type==='final' ? 'Clasificacion_Final' : 'Clasificacion'}.pdf`)
   }
   
