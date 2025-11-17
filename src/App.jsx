@@ -60,7 +60,15 @@ function calcStandings(t){
   const res = {}
   t.players.forEach(p => res[p.id] = { id:p.id, name:p.name, points:0, wins:0, draws:0, losses:0, omw:0, _mw:0, opps:new Set(), byes:0, dropped:p.dropped || false })
   t.rounds.forEach(r => r.pairings.forEach(m => {
-    if(!m.p2 && m.result===RESULT.BYE){ const a=res[m.p1]; if(!a) return; a.points+=POINTS.BYE; a.wins++; a.byes++; return }
+    // Manejar casos de bye - el jugador recibe los puntos configurados para BYE
+    if(!m.p2 && m.result===RESULT.BYE){ 
+      const a=res[m.p1]; 
+      if(!a) return; 
+      a.points+=POINTS.BYE; // El jugador recibe puntos por BYE según configuración
+      a.wins++; 
+      a.byes++; 
+      return 
+    }
     const a=res[m.p1]; const b=res[m.p2]; if(!a||!b) return
     a.opps.add(b.id); b.opps.add(a.id)
     if(!m.result) return
@@ -511,6 +519,17 @@ function swissPairings(t){
     // Asignar bye al jugador con más baja prioridad que no haya tenido bye antes
     const byePlayer = playersWithStats.pop();
     if (byePlayer) {
+      // Crear un emparejamiento de bye directamente aquí
+      pairs.push({ 
+        id: uid('m'), 
+        table: base + pairs.length, 
+        p1: byePlayer.id, 
+        p2: null, 
+        p1Wins: 2, 
+        p2Wins: 0, 
+        result: RESULT.BYE 
+      });
+      
       // Registrar detalles del bye
       pairingDetails.push({
         type: 'bye',
@@ -568,10 +587,11 @@ function swissPairings(t){
   // Convertir los mejores pares encontrados a formato de emparejamientos
   const pairs = [];
   
-  // Procesar cada par óptimo
+  // Procesar cada par óptimo (excepto los byes que ya se procesaron)
   bestPairs.forEach((pair, index) => {
     if (pair.isBye || !pair.p2) {
-      // Crear emparejamiento con bye
+      // Si es un bye del algoritmo recursivo, crear emparejamiento
+      // Esto solo se aplica a casos donde no se manejó el bye previamente
       pairs.push({
         id: uid('m'),
         table: base + pairs.length,
