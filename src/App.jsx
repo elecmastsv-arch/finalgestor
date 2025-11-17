@@ -224,166 +224,407 @@ function eliminationPairings(t) {
 }
 
 function swissPairings(t){
+  // Configuración por defecto para prioridades de emparejamiento
+  const pairingConfig = t.meta.pairingConfig || {
+    avoidRepeatWeight: 1000,       // Peso para evitar repeticiones
+    pwgWeight: 10,                // Peso para mantener mismo PWG
+    owgWeight: 1,                 // Peso para OWG similar
+    colorBalanceWeight: 5,        // Peso para equilibrio de colores
+    winLossBalanceWeight: 3,      // Peso para historial de victorias/derrotas
+    dynamicGroupThreshold: 3,     // Umbral para ajuste dinámico de grupos
+    maxRecursionDepth: 5,         // Profundidad máxima de recursión
+    logPairingDetails: false      // Registro detallado de emparejamientos
+  };
+  
+  // Calcular número de mesa base
   const base = Math.max(1, t.rounds.reduce((acc,r)=> Math.max(acc, ...(r.pairings.map(m=>m.table)) ), 0) + 1)
   const actives = t.players.filter(p=>!p.dropped)
   const st = calcStandings(t)
   
-  // Asignar datos de clasificación a jugadores activos
+  // Variable para almacenar información de depuración sobre los emparejamientos
+  const pairingDetails = [];
+  
+  // Obtener historial completo de cada jugador
+  const getPlayerHistory = (playerId) => {
+    const history = {
+      colorBalance: 0,  // +1 por cada vez como P1, -1 por cada vez como P2
+      opponents: [],    // IDs de oponentes previos
+      wins: 0,          // Número de victorias
+      losses: 0,        // Número de derrotas
+      byes: 0,          // Número de byes recibidos
+      winAgainst: [],   // IDs de oponentes vencidos
+      lostAgainst: []   // IDs de oponentes contra los que perdió
+    };
+    
+    t.rounds.forEach(round => {
+      round.pairings.forEach(match => {
+        if (match.p1 === playerId) {
+          history.colorBalance++;
+          
+          if (match.p2) { // No es un bye
+            history.opponents.push(match.p2);
+            
+            if (match.result === RESULT.P1) {
+              history.wins++;
+              history.winAgainst.push(match.p2);
+            } else if (match.result === RESULT.P2) {
+              history.losses++;
+              history.lostAgainst.push(match.p2);
+            }
+          } else if (match.result === RESULT.BYE) {
+            history.byes++;
+          }
+        } else if (match.p2 === playerId) {
+          history.colorBalance--;
+          history.opponents.push(match.p1);
+          
+          if (match.result === RESULT.P2) {
+            history.wins++;
+            history.winAgainst.push(match.p1);
+          } else if (match.result === RESULT.P1) {
+            history.losses++;
+            history.lostAgainst.push(match.p1);
+          }
+        }
+      });
+    });
+    
+    return history;
+  };
+  
+  // Asignar datos de clasificación y estadísticas a jugadores activos
   const playersWithStats = actives.map(p => {
-    const stats = st.find(s => s.id === p.id) || { points: 0, omw: 0, wins: 0 }
+    const stats = st.find(s => s.id === p.id) || { points: 0, omw: 0, wins: 0, losses: 0 };
+    const history = getPlayerHistory(p.id);
+    
     return {
       ...p,
       points: stats.points || 0,
       omw: stats.omw || 0,
       wins: stats.wins || 0,
-      pwg: 0, // Pairing Weight Group (se calculará más adelante)
-      owg: 0, // Opponent Win Group (se calculará más adelante)
-      previousOpponents: stats.opps ? [...stats.opps] : []
-    }
-  })
+      losses: stats.losses || 0,
+      pwg: 0,                   // Pairing Weight Group (se calculará más adelante)
+      owg: 0,                   // Opponent Win Group (se calculará más adelante)
+      colorBalance: history.colorBalance,
+      previousOpponents: history.opponents,
+      winAgainst: history.winAgainst,
+      lostAgainst: history.lostAgainst,
+      byeCount: history.byes,
+      pairingScore: 0           // Puntuación para calidad de emparejamiento
+    };
+  });
   
-  // Ordenar jugadores por puntos primero
-  playersWithStats.sort((a, b) => b.points - a.points || b.omw - a.omw || b.wins - a.wins || a.name.localeCompare(b.name))
+  // Ordenar jugadores por puntos y criterios de desempate
+  playersWithStats.sort((a, b) => {
+    return b.points - a.points || 
+           b.omw - a.omw || 
+           b.wins - a.wins || 
+           a.name.localeCompare(b.name);
+  });
   
   // Asignar Pairing Weight Group (PWG) - agrupar por puntos
-  let currentPoints = -1
-  let currentPWG = 0
+  let currentPoints = -1;
+  let currentPWG = 0;
   playersWithStats.forEach(p => {
     if (p.points !== currentPoints) {
-      currentPoints = p.points
-      currentPWG++
+      currentPoints = p.points;
+      currentPWG++;
     }
-    p.pwg = currentPWG
-  })
+    p.pwg = currentPWG;
+  });
   
-  // Asignar Opponent Win Group (OWG) - agrupar por OMW dentro de cada PWG
+  // Contar jugadores por PWG para ajuste dinámico
+  const pwgCounts = {};
+  playersWithStats.forEach(p => {
+    pwgCounts[p.pwg] = (pwgCounts[p.pwg] || 0) + 1;
+  });
+  
+  // Ajuste dinámico de grupos pequeños
+  const minGroupSize = pairingConfig.dynamicGroupThreshold;
+  playersWithStats.forEach(p => {
+    // Si un grupo es demasiado pequeño, fusionarlo con el grupo adyacente
+    if (pwgCounts[p.pwg] < minGroupSize) {
+      // Determinar si fusionar con el grupo superior o inferior
+      if (p.pwg > 1 && (pwgCounts[p.pwg-1] || 0) >= pwgCounts[p.pwg]) {
+        p.pwg = p.pwg - 1; // Fusionar con grupo superior
+      } else if (pwgCounts[p.pwg+1] && pwgCounts[p.pwg+1] >= pwgCounts[p.pwg]) {
+        p.pwg = p.pwg + 1; // Fusionar con grupo inferior
+      }
+    }
+  });
+  
+  // Recalcular conteos después del ajuste dinámico
+  const adjustedPwgCounts = {};
+  playersWithStats.forEach(p => {
+    adjustedPwgCounts[p.pwg] = (adjustedPwgCounts[p.pwg] || 0) + 1;
+  });
+  
+  // Asignar Opponent Win Group (OWG) - agrupar por OMW dentro de cada PWG ajustado
   playersWithStats.forEach(p => {
     // Agrupar jugadores por PWG y luego por OMW
-    const pwgGroup = playersWithStats.filter(other => other.pwg === p.pwg)
-    pwgGroup.sort((a, b) => b.omw - a.omw)
+    const pwgGroup = playersWithStats.filter(other => other.pwg === p.pwg);
+    pwgGroup.sort((a, b) => b.omw - a.omw);
     
     // Dividir cada PWG en 3 OWG (alto, medio, bajo)
-    const groupSize = Math.ceil(pwgGroup.length / 3)
-    const topOWG = pwgGroup.slice(0, groupSize)
-    const midOWG = pwgGroup.slice(groupSize, groupSize * 2)
-    const lowOWG = pwgGroup.slice(groupSize * 2)
+    const groupSize = Math.max(1, Math.ceil(pwgGroup.length / 3));
+    const topOWG = pwgGroup.slice(0, groupSize);
+    const midOWG = pwgGroup.slice(groupSize, groupSize * 2);
+    const lowOWG = pwgGroup.slice(groupSize * 2);
     
     // Asignar OWG 1-3 (1 = alto, 2 = medio, 3 = bajo)
     if (topOWG.some(player => player.id === p.id)) {
-      p.owg = 1
+      p.owg = 1;
     } else if (midOWG.some(player => player.id === p.id)) {
-      p.owg = 2
+      p.owg = 2;
     } else {
-      p.owg = 3
+      p.owg = 3;
     }
-  })
+  });
   
   // Reordenar para emparejar - mantener agrupación por PWG pero ordenar por OWG dentro de cada grupo
   playersWithStats.sort((a, b) => 
     a.pwg - b.pwg || // Primero por PWG (ascendente)
     a.owg - b.owg || // Luego por OWG (ascendente)
     b.omw - a.omw || // En caso de empate, por OMW (descendente)
+    a.colorBalance - b.colorBalance || // Balance de color
     a.name.localeCompare(b.name) // Al final por nombre
-  )
+  );
   
   // Array para almacenar los pares finales
-  const pairs = []
+  let bestPairs = [];
+  let bestPairingScore = -Infinity;
+  
+  // Función para calcular la puntuación de calidad de un emparejamiento
+  const calculateMatchScore = (p1, p2) => {
+    // Evitar repetir emparejamientos
+    const hasPlayedBefore = p1.previousOpponents.includes(p2.id) ? pairingConfig.avoidRepeatWeight : 0;
+    
+    // Preferir mismo PWG
+    const pwgDiff = Math.abs(p1.pwg - p2.pwg) * pairingConfig.pwgWeight;
+    
+    // Preferir OWG similar
+    const owgDiff = Math.abs(p1.owg - p2.owg) * pairingConfig.owgWeight;
+    
+    // Equilibrio de color
+    let colorBalanceDiff = 0;
+    if (p1.colorBalance > 0 && p2.colorBalance < 0) {
+      // P1 ha sido más veces P1, P2 ha sido más veces P2 -> buen equilibrio
+      colorBalanceDiff = 0;
+    } else if (p1.colorBalance < 0 && p2.colorBalance > 0) {
+      // P1 ha sido más veces P2, P2 ha sido más veces P1 -> buen equilibrio
+      colorBalanceDiff = 0;
+    } else {
+      // Ambos han sido mayormente el mismo color -> mal equilibrio
+      colorBalanceDiff = Math.min(Math.abs(p1.colorBalance), Math.abs(p2.colorBalance)) * pairingConfig.colorBalanceWeight;
+    }
+    
+    // Balance de victoria/derrota
+    let winLossBalance = 0;
+    if (p1.winAgainst.includes(p2.id) || p2.winAgainst.includes(p1.id)) {
+      // Uno ya ha vencido al otro, sería mejor un oponente diferente
+      winLossBalance = pairingConfig.winLossBalanceWeight;
+    }
+    
+    // Puntaje menor = mejor emparejamiento
+    // Valores negativos significan que el emparejamiento es bueno
+    return -(hasPlayedBefore + pwgDiff + owgDiff + colorBalanceDiff + winLossBalance);
+  };
+  
+  // Función recursiva para encontrar el mejor emparejamiento global
+  const findOptimalPairing = (players, currentPairs = [], depth = 0) => {
+    // Caso base: todos emparejados o llegamos a la profundidad máxima
+    if (players.length === 0 || depth > pairingConfig.maxRecursionDepth) {
+      // Calcular puntuación total de este emparejamiento
+      let pairingScore = 0;
+      for (const pair of currentPairs) {
+        pairingScore += pair.score || 0;
+      }
+      
+      // Si este emparejamiento es mejor que el anterior mejor
+      if (pairingScore > bestPairingScore) {
+        bestPairingScore = pairingScore;
+        bestPairs = [...currentPairs];
+      }
+      return;
+    }
+    
+    const current = players[0];
+    const remainingPlayers = players.slice(1);
+    
+    // Probar emparejar el jugador actual con cada uno de los restantes
+    for (let i = 0; i < remainingPlayers.length; i++) {
+      const opponent = remainingPlayers[i];
+      const matchScore = calculateMatchScore(current, opponent);
+      
+      // Crear nuevo emparejamiento para esta combinación
+      const newPair = { 
+        p1: current.id, 
+        p2: opponent.id,
+        score: matchScore,
+        details: {
+          pwgDiff: Math.abs(current.pwg - opponent.pwg),
+          owgDiff: Math.abs(current.owg - opponent.owg),
+          playedBefore: current.previousOpponents.includes(opponent.id),
+          colorBalance: { p1: current.colorBalance, p2: opponent.colorBalance },
+          winLossHistory: {
+            p1WonBefore: current.winAgainst.includes(opponent.id),
+            p2WonBefore: opponent.winAgainst.includes(current.id)
+          }
+        }
+      };
+      
+      // Crear una nueva lista de jugadores sin los dos emparejados
+      const newRemainingPlayers = [...remainingPlayers];
+      newRemainingPlayers.splice(i, 1);
+      
+      // Llamada recursiva
+      findOptimalPairing(newRemainingPlayers, [...currentPairs, newPair], depth + 1);
+    }
+    
+    // Si no quedan jugadores para emparejar con el actual, asignar bye
+    if (remainingPlayers.length === 0) {
+      const newPair = { p1: current.id, p2: null, isBye: true };
+      findOptimalPairing([], [...currentPairs, newPair], depth + 1);
+    }
+  };
   
   // Si hay número impar de jugadores, asignar un bye
   if (playersWithStats.length % 2 === 1) {
-    // Buscar el jugador elegible con menos puntos que no haya tenido bye antes
-    const candForBye = [...playersWithStats]
-      .reverse() // Empezar por los de menos puntos
-      .find(p => !t.rounds.some(r => r.pairings.some(m => m.p1 === p.id && m.result === RESULT.BYE)))
+    // Ordenar candidatos para bye por: 
+    // 1. No haber tenido bye antes
+    // 2. Tener menos puntos
+    // 3. Estar más abajo en la clasificación
+    playersWithStats.sort((a, b) => {
+      const aHadBye = t.rounds.some(r => r.pairings.some(m => m.p1 === a.id && m.result === RESULT.BYE));
+      const bHadBye = t.rounds.some(r => r.pairings.some(m => m.p1 === b.id && m.result === RESULT.BYE));
+      
+      if (aHadBye && !bHadBye) return 1;
+      if (!aHadBye && bHadBye) return -1;
+      
+      if (a.byeCount !== b.byeCount) return a.byeCount - b.byeCount;
+      if (a.points !== b.points) return a.points - b.points;
+      if (a.rank !== b.rank) return b.rank - a.rank;
+      
+      return 0;
+    });
     
-    if (candForBye) {
-      // Eliminar al jugador del array para emparejamiento
-      const byePlayerIndex = playersWithStats.findIndex(p => p.id === candForBye.id)
-      if (byePlayerIndex !== -1) {
-        playersWithStats.splice(byePlayerIndex, 1)
-        
-        // Asignar bye
-        pairs.push({ 
-          id: uid('m'), 
-          table: base + pairs.length, 
-          p1: candForBye.id, 
-          p2: null, 
-          p1Wins: 2, 
-          p2Wins: 0, 
-          result: RESULT.BYE 
-        })
-      }
+    // Asignar bye al jugador con más baja prioridad que no haya tenido bye antes
+    const byePlayer = playersWithStats.pop();
+    if (byePlayer) {
+      // Registrar detalles del bye
+      pairingDetails.push({
+        type: 'bye',
+        player: byePlayer.name,
+        reason: `Asignado a ${byePlayer.name} por tener ${byePlayer.points} puntos y posición ${byePlayer.rank}`
+      });
     }
   }
   
-  // Array de jugadores sin emparejar
-  let remainingPlayers = [...playersWithStats]
-  
-  // Realizar emparejamientos dentro de cada PWG cuando sea posible
-  while (remainingPlayers.length > 0) {
-    const current = remainingPlayers[0]
-    remainingPlayers.splice(0, 1) // Quitar el jugador actual
-    
-    // Buscar mejor oponente que no haya jugado antes con el jugador actual
-    let bestOpponentIdx = -1
-    let bestScore = Number.MAX_VALUE
-    
-    for (let i = 0; i < remainingPlayers.length; i++) {
-      const candidate = remainingPlayers[i]
+  // Si hay suficientes jugadores, usar el algoritmo recursivo para encontrar el emparejamiento óptimo
+  if (playersWithStats.length <= 20) { // Limitar el algoritmo recursivo a torneos pequeños-medianos
+    findOptimalPairing(playersWithStats);
+  } else {
+    // Para torneos más grandes, usar el algoritmo greedy
+    const remainingPlayers = [...playersWithStats];
+    while (remainingPlayers.length >= 2) {
+      const current = remainingPlayers.shift();
+      let bestOpponentIdx = -1;
+      let bestScore = -Infinity;
       
-      // Evitar repetir emparejamientos (peso alto)
-      const hasPlayedBefore = hasPlayed(t, current.id, candidate.id) ? 1000 : 0
+      for (let i = 0; i < remainingPlayers.length; i++) {
+        const score = calculateMatchScore(current, remainingPlayers[i]);
+        if (score > bestScore) {
+          bestScore = score;
+          bestOpponentIdx = i;
+        }
+      }
       
-      // Calcular la "distancia" entre jugadores basada en PWG y OWG
-      // Preferir emparejar jugadores del mismo PWG y OWG similar
-      const pwgDiff = Math.abs(current.pwg - candidate.pwg)
-      const owgDiff = Math.abs(current.owg - candidate.owg)
-      
-      // Puntaje menor = mejor emparejamiento
-      // La fórmula prioriza: primero no repetir, luego mismo PWG, y luego OWG similar
-      const score = hasPlayedBefore + (pwgDiff * 10) + owgDiff
-      
-      if (score < bestScore) {
-        bestScore = score
-        bestOpponentIdx = i
+      if (bestOpponentIdx !== -1) {
+        const opponent = remainingPlayers.splice(bestOpponentIdx, 1)[0];
+        bestPairs.push({
+          p1: current.id, 
+          p2: opponent.id,
+          score: bestScore,
+          details: {
+            pwgDiff: Math.abs(current.pwg - opponent.pwg),
+            owgDiff: Math.abs(current.owg - opponent.owg),
+            playedBefore: current.previousOpponents.includes(opponent.id),
+            colorBalance: { p1: current.colorBalance, p2: opponent.colorBalance },
+            winLossHistory: {
+              p1WonBefore: current.winAgainst.includes(opponent.id),
+              p2WonBefore: opponent.winAgainst.includes(current.id)
+            }
+          }
+        });
       }
     }
     
-    // Si no encontró oponente sin repetición pero necesitamos emparejar,
-    // elegir el primero disponible (solo si es estrictamente necesario)
-    if (bestOpponentIdx === -1 && remainingPlayers.length > 0) {
-      bestOpponentIdx = 0
-    }
-    
-    if (bestOpponentIdx !== -1) {
-      const opponent = remainingPlayers[bestOpponentIdx]
-      remainingPlayers.splice(bestOpponentIdx, 1) // Quitar al oponente
-      
-      // Crear el emparejamiento
-      pairs.push({ 
-        id: uid('m'), 
-        table: base + pairs.length, 
-        p1: current.id, 
-        p2: opponent.id, 
-        p1Wins: 0, 
-        p2Wins: 0, 
-        result: null 
-      })
-    } else if (remainingPlayers.length === 0) {
-      // Si no queda nadie más, este jugador recibe bye
-      pairs.push({ 
-        id: uid('m'), 
-        table: base + pairs.length, 
-        p1: current.id, 
-        p2: null, 
-        p1Wins: 2, 
-        p2Wins: 0, 
-        result: RESULT.BYE 
-      })
+    // Si queda un jugador sin emparejar (en caso impar), asignarle bye
+    if (remainingPlayers.length === 1) {
+      bestPairs.push({ p1: remainingPlayers[0].id, p2: null, isBye: true });
     }
   }
   
-  return pairs
+  // Convertir los mejores pares encontrados a formato de emparejamientos
+  const pairs = [];
+  
+  // Procesar cada par óptimo
+  bestPairs.forEach((pair, index) => {
+    if (pair.isBye || !pair.p2) {
+      // Crear emparejamiento con bye
+      pairs.push({
+        id: uid('m'),
+        table: base + pairs.length,
+        p1: pair.p1,
+        p2: null,
+        p1Wins: 2,
+        p2Wins: 0,
+        result: RESULT.BYE,
+        pairingDetails: pair.details || { reason: 'Bye asignado por número impar de jugadores' }
+      });
+    } else {
+      // Determinar orden P1/P2 basado en balance de color
+      const player1 = playersWithStats.find(p => p.id === pair.p1);
+      const player2 = playersWithStats.find(p => p.id === pair.p2);
+      
+      let p1Id = pair.p1;
+      let p2Id = pair.p2;
+      
+      // Si los jugadores tienen desbalance de color, intentar equilibrarlo
+      if (player1 && player2) {
+        if (player1.colorBalance > player2.colorBalance) {
+          // Player1 ha sido más P1 que P2, intercambiar posiciones
+          p1Id = pair.p2;
+          p2Id = pair.p1;
+        }
+      }
+      
+      // Crear emparejamiento normal
+      pairs.push({
+        id: uid('m'),
+        table: base + pairs.length,
+        p1: p1Id,
+        p2: p2Id,
+        p1Wins: 0,
+        p2Wins: 0,
+        result: null,
+        pairingDetails: pair.details
+      });
+    }
+  });
+  
+  // Guardar detalles de emparejamiento si está habilitado el registro
+  if (pairingConfig.logPairingDetails) {
+    console.log('Detalles de emparejamiento para ronda ' + (t.rounds.length + 1) + ':', {
+      pairs,
+      pairingDetails,
+      pwgCounts,
+      adjustedPwgCounts,
+      pairingScore: bestPairingScore
+    });
+  }
+  
+  return pairs;
 }
 function determineResult(m){
   if(!m.p2) return RESULT.BYE
