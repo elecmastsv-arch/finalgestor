@@ -644,6 +644,63 @@ function swissPairings(t){
     });
   }
   
+  // Verificar que tengamos pares válidos para devolver
+  if (pairs.length === 0) {
+    // Si no se generaron pares, usar el algoritmo simple como respaldo
+    const simpleIds = actives.map(p => p.id);
+    const simplePairs = [];
+    
+    // Manejar número impar de jugadores con bye
+    if(simpleIds.length % 2 === 1){
+      const cand = [...actives].reverse().find(p => !t.rounds.some(r => r.pairings.some(m => m.p1 === p.id && m.result === RESULT.BYE)));
+      if(cand){ 
+        const idx = simpleIds.indexOf(cand.id);
+        if (idx !== -1) {
+          simpleIds.splice(idx, 1); 
+          simplePairs.push({ 
+            id: uid('m'), 
+            table: base + simplePairs.length, 
+            p1: cand.id, 
+            p2: null, 
+            p1Wins: 2, 
+            p2Wins: 0, 
+            result: RESULT.BYE 
+          }); 
+        }
+      }
+    }
+    
+    // Emparejamiento simple como respaldo
+    while(simpleIds.length >= 2){
+      const a = simpleIds.shift();
+      const b = simpleIds.shift();
+      simplePairs.push({ 
+        id: uid('m'), 
+        table: base + simplePairs.length, 
+        p1: a, 
+        p2: b, 
+        p1Wins: 0, 
+        p2Wins: 0, 
+        result: null 
+      });
+    }
+    
+    // Si quedó un jugador sin emparejar, darle bye
+    if (simpleIds.length === 1) {
+      simplePairs.push({ 
+        id: uid('m'), 
+        table: base + simplePairs.length, 
+        p1: simpleIds[0], 
+        p2: null, 
+        p1Wins: 2, 
+        p2Wins: 0, 
+        result: RESULT.BYE 
+      });
+    }
+    
+    return simplePairs;
+  }
+  
   return pairs;
 }
 function determineResult(m){
