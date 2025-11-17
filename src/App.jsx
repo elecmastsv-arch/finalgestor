@@ -227,22 +227,162 @@ function swissPairings(t){
   const base = Math.max(1, t.rounds.reduce((acc,r)=> Math.max(acc, ...(r.pairings.map(m=>m.table)) ), 0) + 1)
   const actives = t.players.filter(p=>!p.dropped)
   const st = calcStandings(t)
-  const ordered = actives.map(p=>({...p, points: st.find(s=>s.id===p.id)?.points||0})).sort((a,b)=> b.points-a.points || a.name.localeCompare(b.name))
-  const ids = ordered.map(p=>p.id)
+  
+  // Asignar datos de clasificación a jugadores activos
+  const playersWithStats = actives.map(p => {
+    const stats = st.find(s => s.id === p.id) || { points: 0, omw: 0, wins: 0 }
+    return {
+      ...p,
+      points: stats.points || 0,
+      omw: stats.omw || 0,
+      wins: stats.wins || 0,
+      pwg: 0, // Pairing Weight Group (se calculará más adelante)
+      owg: 0, // Opponent Win Group (se calculará más adelante)
+      previousOpponents: stats.opps ? [...stats.opps] : []
+    }
+  })
+  
+  // Ordenar jugadores por puntos primero
+  playersWithStats.sort((a, b) => b.points - a.points || b.omw - a.omw || b.wins - a.wins || a.name.localeCompare(b.name))
+  
+  // Asignar Pairing Weight Group (PWG) - agrupar por puntos
+  let currentPoints = -1
+  let currentPWG = 0
+  playersWithStats.forEach(p => {
+    if (p.points !== currentPoints) {
+      currentPoints = p.points
+      currentPWG++
+    }
+    p.pwg = currentPWG
+  })
+  
+  // Asignar Opponent Win Group (OWG) - agrupar por OMW dentro de cada PWG
+  playersWithStats.forEach(p => {
+    // Agrupar jugadores por PWG y luego por OMW
+    const pwgGroup = playersWithStats.filter(other => other.pwg === p.pwg)
+    pwgGroup.sort((a, b) => b.omw - a.omw)
+    
+    // Dividir cada PWG en 3 OWG (alto, medio, bajo)
+    const groupSize = Math.ceil(pwgGroup.length / 3)
+    const topOWG = pwgGroup.slice(0, groupSize)
+    const midOWG = pwgGroup.slice(groupSize, groupSize * 2)
+    const lowOWG = pwgGroup.slice(groupSize * 2)
+    
+    // Asignar OWG 1-3 (1 = alto, 2 = medio, 3 = bajo)
+    if (topOWG.some(player => player.id === p.id)) {
+      p.owg = 1
+    } else if (midOWG.some(player => player.id === p.id)) {
+      p.owg = 2
+    } else {
+      p.owg = 3
+    }
+  })
+  
+  // Reordenar para emparejar - mantener agrupación por PWG pero ordenar por OWG dentro de cada grupo
+  playersWithStats.sort((a, b) => 
+    a.pwg - b.pwg || // Primero por PWG (ascendente)
+    a.owg - b.owg || // Luego por OWG (ascendente)
+    b.omw - a.omw || // En caso de empate, por OMW (descendente)
+    a.name.localeCompare(b.name) // Al final por nombre
+  )
+  
+  // Array para almacenar los pares finales
   const pairs = []
-
-  if(ordered.length % 2 === 1){
-    const cand = [...ordered].reverse().find(p=> !t.rounds.some(r=> r.pairings.some(m=> m.p1===p.id && m.result===RESULT.BYE )))
-    if(cand){ ids.splice(ids.indexOf(cand.id),1); pairs.push({ id:uid('m'), table: base+pairs.length, p1:cand.id, p2:null, p1Wins:2, p2Wins:0, result:RESULT.BYE }) }
+  
+  // Si hay número impar de jugadores, asignar un bye
+  if (playersWithStats.length % 2 === 1) {
+    // Buscar el jugador elegible con menos puntos que no haya tenido bye antes
+    const candForBye = [...playersWithStats]
+      .reverse() // Empezar por los de menos puntos
+      .find(p => !t.rounds.some(r => r.pairings.some(m => m.p1 === p.id && m.result === RESULT.BYE)))
+    
+    if (candForBye) {
+      // Eliminar al jugador del array para emparejamiento
+      const byePlayerIndex = playersWithStats.findIndex(p => p.id === candForBye.id)
+      if (byePlayerIndex !== -1) {
+        playersWithStats.splice(byePlayerIndex, 1)
+        
+        // Asignar bye
+        pairs.push({ 
+          id: uid('m'), 
+          table: base + pairs.length, 
+          p1: candForBye.id, 
+          p2: null, 
+          p1Wins: 2, 
+          p2Wins: 0, 
+          result: RESULT.BYE 
+        })
+      }
+    }
   }
-  while(ids.length){
-    const a = ids.shift()
-    let idx = ids.findIndex(b=> !hasPlayed(t,a,b) )
-    if(idx===-1) idx = 0
-    const b = ids.splice(idx,1)[0]
-    if(!b) break
-    pairs.push({ id:uid('m'), table: base+pairs.length, p1:a, p2:b, p1Wins:0, p2Wins:0, result:null })
+  
+  // Array de jugadores sin emparejar
+  let remainingPlayers = [...playersWithStats]
+  
+  // Realizar emparejamientos dentro de cada PWG cuando sea posible
+  while (remainingPlayers.length > 0) {
+    const current = remainingPlayers[0]
+    remainingPlayers.splice(0, 1) // Quitar el jugador actual
+    
+    // Buscar mejor oponente que no haya jugado antes con el jugador actual
+    let bestOpponentIdx = -1
+    let bestScore = Number.MAX_VALUE
+    
+    for (let i = 0; i < remainingPlayers.length; i++) {
+      const candidate = remainingPlayers[i]
+      
+      // Evitar repetir emparejamientos (peso alto)
+      const hasPlayedBefore = hasPlayed(t, current.id, candidate.id) ? 1000 : 0
+      
+      // Calcular la "distancia" entre jugadores basada en PWG y OWG
+      // Preferir emparejar jugadores del mismo PWG y OWG similar
+      const pwgDiff = Math.abs(current.pwg - candidate.pwg)
+      const owgDiff = Math.abs(current.owg - candidate.owg)
+      
+      // Puntaje menor = mejor emparejamiento
+      // La fórmula prioriza: primero no repetir, luego mismo PWG, y luego OWG similar
+      const score = hasPlayedBefore + (pwgDiff * 10) + owgDiff
+      
+      if (score < bestScore) {
+        bestScore = score
+        bestOpponentIdx = i
+      }
+    }
+    
+    // Si no encontró oponente sin repetición pero necesitamos emparejar,
+    // elegir el primero disponible (solo si es estrictamente necesario)
+    if (bestOpponentIdx === -1 && remainingPlayers.length > 0) {
+      bestOpponentIdx = 0
+    }
+    
+    if (bestOpponentIdx !== -1) {
+      const opponent = remainingPlayers[bestOpponentIdx]
+      remainingPlayers.splice(bestOpponentIdx, 1) // Quitar al oponente
+      
+      // Crear el emparejamiento
+      pairs.push({ 
+        id: uid('m'), 
+        table: base + pairs.length, 
+        p1: current.id, 
+        p2: opponent.id, 
+        p1Wins: 0, 
+        p2Wins: 0, 
+        result: null 
+      })
+    } else if (remainingPlayers.length === 0) {
+      // Si no queda nadie más, este jugador recibe bye
+      pairs.push({ 
+        id: uid('m'), 
+        table: base + pairs.length, 
+        p1: current.id, 
+        p2: null, 
+        p1Wins: 2, 
+        p2Wins: 0, 
+        result: RESULT.BYE 
+      })
+    }
   }
+  
   return pairs
 }
 function determineResult(m){
