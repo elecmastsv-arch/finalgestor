@@ -232,6 +232,8 @@ function eliminationPairings(t) {
 }
 
 function swissPairings(t){
+  console.log('Ejecutando swissPairings...');
+  
   // Configuración por defecto para prioridades de emparejamiento
   const pairingConfig = t.meta.pairingConfig || {
     avoidRepeatWeight: 1000,       // Peso para evitar repeticiones
@@ -241,7 +243,7 @@ function swissPairings(t){
     winLossBalanceWeight: 3,      // Peso para historial de victorias/derrotas
     dynamicGroupThreshold: 3,     // Umbral para ajuste dinámico de grupos
     maxRecursionDepth: 5,         // Profundidad máxima de recursión
-    logPairingDetails: false      // Registro detallado de emparejamientos
+    logPairingDetails: true       // Registro detallado de emparejamientos (activado para depuración)
   };
   
   // Calcular número de mesa base
@@ -634,26 +636,25 @@ function swissPairings(t){
   });
   
   // Guardar detalles de emparejamiento si está habilitado el registro
-  if (pairingConfig.logPairingDetails) {
-    console.log('Detalles de emparejamiento para ronda ' + (t.rounds.length + 1) + ':', {
-      pairs,
-      pairingDetails,
-      pwgCounts,
-      adjustedPwgCounts,
-      pairingScore: bestPairingScore
-    });
-  }
+  console.log('Detalles de emparejamiento para ronda ' + (t.rounds.length + 1) + ':');
+  console.log('- Número de pares generados:', pairs.length);
+  console.log('- Número de jugadores activos:', actives.length);
   
   // Verificar que tengamos pares válidos para devolver
-  if (pairs.length === 0) {
+  if (!pairs || pairs.length === 0) {
+    console.log('No se generaron pares, usando algoritmo simple de respaldo');
     // Si no se generaron pares, usar el algoritmo simple como respaldo
     const simpleIds = actives.map(p => p.id);
     const simplePairs = [];
     
+    console.log('Jugadores activos para respaldo:', simpleIds.length);
+    
     // Manejar número impar de jugadores con bye
     if(simpleIds.length % 2 === 1){
+      console.log('Número impar de jugadores, asignando bye');
       const cand = [...actives].reverse().find(p => !t.rounds.some(r => r.pairings.some(m => m.p1 === p.id && m.result === RESULT.BYE)));
       if(cand){ 
+        console.log('Candidato para bye:', cand.name);
         const idx = simpleIds.indexOf(cand.id);
         if (idx !== -1) {
           simpleIds.splice(idx, 1); 
@@ -666,14 +667,21 @@ function swissPairings(t){
             p2Wins: 0, 
             result: RESULT.BYE 
           }); 
+          console.log('Bye asignado a:', cand.name);
         }
       }
     }
     
     // Emparejamiento simple como respaldo
+    console.log('Generando emparejamientos simples para:', simpleIds.length, 'jugadores');
     while(simpleIds.length >= 2){
       const a = simpleIds.shift();
-      const b = simpleIds.shift();
+      let idx = 0;
+      const b = simpleIds.splice(idx, 1)[0];
+      if (!a || !b) {
+        console.error('Error: ID de jugador nulo', {a, b, simpleIds});
+        continue;
+      }
       simplePairs.push({ 
         id: uid('m'), 
         table: base + simplePairs.length, 
@@ -687,6 +695,7 @@ function swissPairings(t){
     
     // Si quedó un jugador sin emparejar, darle bye
     if (simpleIds.length === 1) {
+      console.log('Jugador sin emparejar, asignando bye adicional');
       simplePairs.push({ 
         id: uid('m'), 
         table: base + simplePairs.length, 
@@ -698,9 +707,11 @@ function swissPairings(t){
       });
     }
     
+    console.log('Emparejamientos de respaldo generados:', simplePairs.length);
     return simplePairs;
   }
   
+  console.log('Retornando pares generados:', pairs.length);
   return pairs;
 }
 function determineResult(m){
@@ -818,37 +829,124 @@ ${duplicates.length ? `Se omitieron ${duplicates.length} jugadores duplicados.` 
     return toAdd.length
   }
   const startRound = () => {
-    // Verificar que hay suficientes jugadores activos para iniciar la ronda
-    const activePlayers = t.players.filter(p => !p.dropped);
-    
-    if(activePlayers.length < 2) {
-      return alert('Necesitas al menos 2 jugadores activos (no en estado drop) para iniciar una ronda');
-    }
-    
-    if(current && current.pairings.some(m=>!m.result)) {
-      return alert('Faltan resultados en la ronda actual');
-    }
-    
-    // Verificar si es un torneo de eliminación o suizo
-    const system = t.meta.system || 'swiss';
-    
-    // Generar los emparejamientos para la nueva ronda según el sistema
-    let pairs;
-    if (system === 'elimination') {
-      pairs = eliminationPairings(t);
+    try {
+      console.log('Iniciando nueva ronda...');
+      // Verificar que hay suficientes jugadores activos para iniciar la ronda
+      const activePlayers = t.players.filter(p => !p.dropped);
+      console.log(`Jugadores activos: ${activePlayers.length}`);
       
-      // Si no hay pares en eliminación directa, significa que el torneo ha terminado
-      if (pairs.length === 0) {
-        setT({...t, finished: true});
-        return alert('¡El torneo ha finalizado! Ya se ha determinado un ganador.');
+      if(activePlayers.length < 2) {
+        return alert('Necesitas al menos 2 jugadores activos (no en estado drop) para iniciar una ronda');
       }
-    } else {
-      // Sistema suizo por defecto
-      pairs = swissPairings(t);
+      
+      if(current && current.pairings.some(m=>!m.result)) {
+        return alert('Faltan resultados en la ronda actual');
+      }
+      
+      // Verificar si es un torneo de eliminación o suizo
+      const system = t.meta.system || 'swiss';
+      console.log(`Sistema de torneo: ${system}`);
+      
+      // Generar los emparejamientos para la nueva ronda según el sistema
+      let pairs = [];
+      if (system === 'elimination') {
+        console.log('Generando emparejamientos para eliminación directa');
+        pairs = eliminationPairings(t);
+        
+        // Si no hay pares en eliminación directa, significa que el torneo ha terminado
+        if (pairs.length === 0) {
+          setT({...t, finished: true});
+          return alert('¡El torneo ha finalizado! Ya se ha determinado un ganador.');
+        }
+      } else {
+        // Sistema suizo por defecto
+        console.log('Generando emparejamientos para sistema suizo');
+        try {
+          pairs = swissPairings(t);
+          console.log(`Emparejamientos generados: ${pairs.length}`);
+          console.log('Primer emparejamiento:', pairs[0]);
+        } catch (error) {
+          console.error('Error al generar emparejamientos:', error);
+          alert('Error al generar emparejamientos. Usando sistema de respaldo.');
+          
+          // Sistema de respaldo simple en caso de error
+          pairs = generarEmparejamientosSimples(t);
+        }
+      }
+      
+      // Verificar que tenemos emparejamientos
+      if (!pairs || pairs.length === 0) {
+        console.error('No se generaron emparejamientos');
+        return alert('Error: No se pudieron generar emparejamientos');
+      }
+      
+      // Crear la nueva ronda
+      console.log(`Creando ronda ${t.rounds.length + 1} con ${pairs.length} emparejamientos`);
+      setT({...t, rounds:[...t.rounds, {number:t.rounds.length+1, pairings:pairs}], finished:false});
+      console.log('Nueva ronda creada exitosamente');
+    } catch (error) {
+      console.error('Error en startRound:', error);
+      alert('Error al iniciar nueva ronda: ' + error.message);
+    }
+  }
+  
+  // Función de respaldo simple para generar emparejamientos
+  const generarEmparejamientosSimples = (t) => {
+    const base = Math.max(1, t.rounds.reduce((acc,r)=> Math.max(acc, ...(r.pairings.map(m=>m.table)) ), 0) + 1);
+    const actives = t.players.filter(p=>!p.dropped);
+    const simplePairs = [];
+    const simpleIds = actives.map(p => p.id);
+    
+    // Manejar número impar de jugadores con bye
+    if(simpleIds.length % 2 === 1){
+      const cand = [...actives].reverse().find(p => !t.rounds.some(r => r.pairings.some(m => m.p1===p.id && m.result===RESULT.BYE)));
+      if(cand){ 
+        const idx = simpleIds.indexOf(cand.id);
+        if (idx !== -1) {
+          simpleIds.splice(idx, 1); 
+          simplePairs.push({ 
+            id: uid('m'), 
+            table: base + simplePairs.length, 
+            p1: cand.id, 
+            p2: null, 
+            p1Wins: 2, 
+            p2Wins: 0, 
+            result: RESULT.BYE 
+          }); 
+        }
+      }
     }
     
-    // Crear la nueva ronda
-    setT({...t, rounds:[...t.rounds, {number:t.rounds.length+1, pairings:pairs}], finished:false});
+    // Emparejamiento simple
+    while(simpleIds.length >= 2){
+      const a = simpleIds.shift();
+      let idx = 0; // Emparejamos con el primero disponible
+      const b = simpleIds.splice(idx, 1)[0];
+      simplePairs.push({ 
+        id: uid('m'), 
+        table: base + simplePairs.length, 
+        p1: a, 
+        p2: b, 
+        p1Wins: 0, 
+        p2Wins: 0, 
+        result: null 
+      });
+    }
+    
+    // Si quedó un jugador sin emparejar, darle bye
+    if (simpleIds.length === 1) {
+      simplePairs.push({ 
+        id: uid('m'), 
+        table: base + simplePairs.length, 
+        p1: simpleIds[0], 
+        p2: null, 
+        p1Wins: 2, 
+        p2Wins: 0, 
+        result: RESULT.BYE 
+      });
+    }
+    
+    return simplePairs;
   }
   const updateScore = (rid,mid,field,val) => {
     setT({...t, rounds: t.rounds.map(r=> r.number!==rid? r : ({...r, pairings: r.pairings.map(m=> m.id!==mid? m : ({...m, [field]: Math.max(0, Math.min(3, parseInt(val||0))) }))}))})
